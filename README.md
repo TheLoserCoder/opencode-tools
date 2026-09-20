@@ -7,7 +7,7 @@ Personal tools and skills for [OpenCode](https://opencode.ai).
 | Path                   | Description                                                                 |
 | ---------------------- | --------------------------------------------------------------------------- |
 | `tools/`               | Standalone tools that extend the OpenCode workflow.                         |
-| `tools/window-placement` | Launches a command and moves its GUI window to a monitor other than the one OpenCode is running on. Works for any application, no code changes required. |
+| `tools/window-placement` | Launches a command and moves its GUI window to the virtual desktop where OpenCode is running and to a different monitor. Works for any application, no code changes required. |
 | `skills/`              | Agent skills collected from various sources, kept here for versioning and reuse. |
 
 ## tools/window-placement

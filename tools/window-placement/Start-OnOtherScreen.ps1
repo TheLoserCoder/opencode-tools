@@ -1,5 +1,5 @@
-# Runs a command and places the GUI window(s) it opens on a monitor other than the
-# monitor that currently has focus (normally the OpenCode terminal).
+# Runs a command and places the GUI window(s) it opens on the virtual desktop where
+# OpenCode is running and on a monitor other than the one that currently has focus.
 #
 # The command keeps the current console attached, so its stdout/stderr stay visible
 # in the terminal that launched it.
@@ -7,6 +7,7 @@
 # Usage:
 #   .\Start-OnOtherScreen.ps1 pnpm dev
 #   .\Start-OnOtherScreen.ps1 -TargetScreen 2 notepad
+#   .\Start-OnOtherScreen.ps1 -VirtualDesktop 1 notepad
 #   .\Start-OnOtherScreen.cmd pnpm dev
 
 [CmdletBinding()]
@@ -17,6 +18,8 @@ param(
     [string] $WorkingDirectory = (Get-Location).Path,
 
     [string] $TargetScreen = 'other',
+
+    [string] $VirtualDesktop = 'auto',
 
     [int] $TimeoutSeconds = 30
 )
@@ -99,6 +102,62 @@ function Resolve-TargetScreen {
     return $match[0]
 }
 
+function Import-VirtualDesktopModule {
+    if (-not (Get-Module -ListAvailable -Name VirtualDesktop)) {
+        return $false
+    }
+
+    if (-not (Get-Module -Name VirtualDesktop)) {
+        Import-Module VirtualDesktop -DisableNameChecking -WarningAction SilentlyContinue -ErrorAction Stop
+    }
+
+    return $true
+}
+
+function Resolve-DesktopTarget {
+    param([string] $Selector)
+
+    if ($Selector -ieq 'none') {
+        return $null
+    }
+
+    if (-not (Import-VirtualDesktopModule)) {
+        Write-Warning 'The VirtualDesktop module is not installed; the window will only be moved between monitors.'
+        return $null
+    }
+
+    if ($Selector -ieq 'auto') {
+        $candidateHandles = @()
+        foreach ($provider in @('Get-ActiveWindowHandle', 'Get-ConsoleHandle')) {
+            try {
+                $candidateHandles += & $provider
+            } catch {
+                # Provider is unavailable; try the next one.
+            }
+        }
+
+        foreach ($handle in $candidateHandles) {
+            if ($null -eq $handle -or [int64] $handle -eq 0) {
+                continue
+            }
+
+            try {
+                $index = Get-DesktopIndex (Get-DesktopFromWindow -Hwnd $handle)
+                if ($index -ge 0) {
+                    return [string] $index
+                }
+            } catch {
+                # Window cannot be mapped to a desktop; try the next candidate.
+            }
+        }
+
+        Write-Warning 'Could not determine the OpenCode virtual desktop; skipping the virtual desktop move.'
+        return $null
+    }
+
+    return $Selector
+}
+
 function Quote-CommandLineArgument {
     param([string] $Value)
 
@@ -113,6 +172,7 @@ function Start-WindowPlacementWatcher {
     param(
         [System.Windows.Forms.Screen] $TargetScreen,
         [int] $RootPid,
+        [string] $TargetDesktop,
         [int] $TimeoutSeconds
     )
 
@@ -130,18 +190,27 @@ function Start-WindowPlacementWatcher {
         '-TargetWidth', $workArea.Width
         '-TargetHeight', $workArea.Height
         '-TimeoutSeconds', $TimeoutSeconds
+        '-StartedAfter', (Get-Date).AddSeconds(-2).ToString('o')
     )
+
+    if (-not [string]::IsNullOrWhiteSpace($TargetDesktop)) {
+        $arguments += @('-TargetDesktop', $TargetDesktop)
+    }
 
     Start-Process -FilePath $powerShellPath -ArgumentList $arguments -WindowStyle Hidden | Out-Null
 }
 
 $activeScreen = Get-ActiveScreen
 $target = Resolve-TargetScreen -ActiveScreen $activeScreen -Selector $TargetScreen
+$desktopTarget = Resolve-DesktopTarget -Selector $VirtualDesktop
 
-if ($null -eq $target) {
-    Write-Warning 'A second monitor was not found; running the command without repositioning.'
+if ($null -eq $target -and [string]::IsNullOrWhiteSpace($desktopTarget)) {
+    Write-Warning 'No second monitor and no virtual desktop target; running the command without repositioning.'
+} elseif ($null -eq $target) {
+    Write-Warning 'A second monitor was not found; only the virtual desktop will be adjusted.'
+    Start-WindowPlacementWatcher -TargetScreen $activeScreen -RootPid $PID -TargetDesktop $desktopTarget -TimeoutSeconds $TimeoutSeconds
 } else {
-    Start-WindowPlacementWatcher -TargetScreen $target -RootPid $PID -TimeoutSeconds $TimeoutSeconds
+    Start-WindowPlacementWatcher -TargetScreen $target -RootPid $PID -TargetDesktop $desktopTarget -TimeoutSeconds $TimeoutSeconds
 }
 
 Push-Location -LiteralPath $WorkingDirectory

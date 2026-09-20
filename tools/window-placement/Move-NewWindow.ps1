@@ -1,6 +1,10 @@
 # Watches for GUI windows created by the process tree rooted at -RootPid and moves
-# each new window onto the target monitor rectangle. Exits when the root process
-# exits or when -TimeoutSeconds elapses.
+# each new window onto the target monitor rectangle and, when -TargetDesktop is given,
+# onto the virtual desktop where OpenCode is running. Exits when the root process
+# exits (and no descendants remain) or when -TimeoutSeconds elapses.
+#
+# Moving another application's window to a virtual desktop requires the VirtualDesktop
+# PowerShell module (MScholtes/VirtualDesktop); without it the monitor move still runs.
 
 [CmdletBinding()]
 param(
@@ -19,7 +23,11 @@ param(
     [Parameter(Mandatory = $true)]
     [int] $TargetHeight,
 
-    [int] $TimeoutSeconds = 30
+    [int] $TimeoutSeconds = 30,
+
+    [string] $TargetDesktop = '',
+
+    [string] $StartedAfter = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,24 +45,56 @@ $SCAN_INTERVAL_MILLISECONDS = 200
 
 $selfPid = $PID
 
-function Get-DescendantProcessIds {
+$startedAfterTime = (Get-Date).AddSeconds(-30)
+if (-not [string]::IsNullOrWhiteSpace($StartedAfter)) {
+    $parsedStart = [DateTime]::MinValue
+    if ([DateTime]::TryParse($StartedAfter, [ref] $parsedStart)) {
+        $startedAfterTime = $parsedStart
+    }
+}
+
+function Resolve-DesktopObject {
+    param([string] $Selector)
+
+    $index = 0
+    if ([int]::TryParse($Selector, [ref] $index)) {
+        return Get-Desktop $index
+    }
+
+    return $Selector
+}
+
+$desktopObject = $null
+if (-not [string]::IsNullOrWhiteSpace($TargetDesktop)) {
+    if (Get-Module -ListAvailable -Name VirtualDesktop) {
+        Import-Module VirtualDesktop -DisableNameChecking -WarningAction SilentlyContinue -ErrorAction SilentlyContinue
+        if (Get-Module -Name VirtualDesktop) {
+            $desktopObject = Resolve-DesktopObject -Selector $TargetDesktop
+        }
+    }
+}
+
+function Get-TrackedProcessIds {
     param([int] $Root)
 
     $processes = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
-        Select-Object ProcessId, ParentProcessId
+        Select-Object ProcessId, ParentProcessId, CreationDate
 
     $childrenOf = @{}
+    $liveIds = New-Object System.Collections.Generic.HashSet[int]
     foreach ($process in $processes) {
+        $processId = [int] $process.ProcessId
+        [void] $liveIds.Add($processId)
         $parent = [int] $process.ParentProcessId
         if (-not $childrenOf.ContainsKey($parent)) {
             $childrenOf[$parent] = New-Object System.Collections.ArrayList
         }
-        [void] $childrenOf[$parent].Add([int] $process.ProcessId)
+        [void] $childrenOf[$parent].Add($processId)
     }
 
     $result = New-Object System.Collections.Generic.List[int]
-    $queue = New-Object System.Collections.Generic.Queue[int]
     $seen = New-Object System.Collections.Generic.HashSet[int]
+    $queue = New-Object System.Collections.Generic.Queue[int]
     $queue.Enqueue($Root)
     [void] $seen.Add($Root)
 
@@ -68,6 +108,29 @@ function Get-DescendantProcessIds {
                 $result.Add($child)
                 $queue.Enqueue($child)
             }
+        }
+    }
+
+    # Short-lived intermediate processes (cmd.exe, a wrapper PowerShell) can exit
+    # before the window appears, which breaks the live parent chain. Recover such
+    # processes when they started after launch and their parent is already gone.
+    foreach ($process in $processes) {
+        $processId = [int] $process.ProcessId
+        if ($processId -eq $Root -or $seen.Contains($processId)) {
+            continue
+        }
+
+        if ([DateTime] $process.CreationDate -lt $startedAfterTime) {
+            continue
+        }
+
+        $parent = [int] $process.ParentProcessId
+        if ($liveIds.Contains($parent)) {
+            continue
+        }
+
+        if ($seen.Add($processId)) {
+            $result.Add($processId)
         }
     }
 
@@ -123,7 +186,7 @@ $lastTreeRefresh = [DateTime]::MinValue
 
 while ((Get-Date) -lt $deadline) {
     if (((Get-Date) - $lastTreeRefresh).TotalMilliseconds -ge $TREE_REFRESH_MILLISECONDS) {
-        $descendantIds = Get-DescendantProcessIds -Root $RootPid
+        $descendantIds = Get-TrackedProcessIds -Root $RootPid
         $lastTreeRefresh = Get-Date
 
         # PowerShell does not wait for GUI applications, so the root process may
@@ -144,6 +207,14 @@ while ((Get-Date) -lt $deadline) {
             $key = $handle.ToInt64()
             if ($movedHandles.Contains($key)) {
                 continue
+            }
+
+            if ($null -ne $desktopObject) {
+                try {
+                    Move-Window -Desktop $desktopObject -Hwnd $handle -ErrorAction Stop | Out-Null
+                } catch {
+                    # Keep the window where Windows placed it if the desktop move fails.
+                }
             }
 
             Move-WindowToTarget -Handle $handle -Left $TargetLeft -Top $TargetTop -Width $TargetWidth -Height $TargetHeight

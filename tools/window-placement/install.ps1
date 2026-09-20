@@ -10,7 +10,9 @@
 param(
     [string] $OpenCodeConfigDirectory = (Join-Path $HOME '.config/opencode'),
 
-    [switch] $AddProfileFunction
+    [switch] $AddProfileFunction,
+
+    [switch] $SkipVirtualDesktopModule
 )
 
 $ErrorActionPreference = 'Stop'
@@ -32,11 +34,12 @@ $agentBlock = @(
     '# Window placement'
     ''
     '- When you start a GUI application or a dev server that opens a GUI window, launch it'
-    '  through the window-placement launcher so the window opens on a monitor other than the'
-    '  one OpenCode is running on:'
+    '  through the window-placement launcher so the window opens on the virtual desktop where'
+    '  OpenCode is running and on a monitor other than the one OpenCode is on:'
     ''
     ('  `' + $launcher + '` <command> [arguments]')
-    '- Do not move the window to another virtual desktop.'
+    '- The launcher handles both the virtual desktop and the monitor placement; do not move'
+    '  the window anywhere else yourself.'
     ''
     $endMarker
 ) -join "`r`n"
@@ -102,6 +105,55 @@ if ($AddProfileFunction) {
 
     Set-Content -LiteralPath $profilePath -Value $profileContent -Encoding utf8 -NoNewline
     Write-Host "Updated PowerShell profile $profilePath"
+}
+
+function Get-UserModuleDirectory {
+    $edition = if ($PSVersionTable.PSEdition -eq 'Core') { 'PowerShell' } else { 'WindowsPowerShell' }
+    return Join-Path $HOME ("Documents\{0}\Modules" -f $edition)
+}
+
+function Ensure-VirtualDesktopModule {
+    if (Get-Module -ListAvailable -Name VirtualDesktop) {
+        Write-Host 'VirtualDesktop module is already installed.'
+        return
+    }
+
+    try {
+        Install-Module -Name VirtualDesktop -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
+        Write-Host 'Installed the VirtualDesktop module from PSGallery.'
+        return
+    } catch {
+        Write-Warning "Install-Module failed ($($_.Exception.Message)); downloading the module directly."
+    }
+
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $temporaryDirectory = Join-Path $env:TEMP ('VirtualDesktop-' + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $temporaryDirectory | Out-Null
+        $packagePath = Join-Path $temporaryDirectory 'VirtualDesktop.zip'
+        Invoke-WebRequest -Uri 'https://www.powershellgallery.com/api/v2/package/VirtualDesktop' -OutFile $packagePath -UseBasicParsing
+        $expandedPath = Join-Path $temporaryDirectory 'expanded'
+        Expand-Archive -Path $packagePath -DestinationPath $expandedPath -Force
+
+        $moduleDirectory = Join-Path (Get-UserModuleDirectory) 'VirtualDesktop'
+        New-Item -ItemType Directory -Force -Path $moduleDirectory | Out-Null
+        foreach ($file in @('VirtualDesktop.psd1', 'VirtualDesktop.psm1', 'VirtualDesktop.ps1', 'functions.cat')) {
+            $source = Join-Path $expandedPath $file
+            if (Test-Path -LiteralPath $source) {
+                Copy-Item -LiteralPath $source -Destination $moduleDirectory -Force
+            }
+        }
+
+        Remove-Item -Recurse -Force $temporaryDirectory -ErrorAction SilentlyContinue
+        Write-Host "Installed the VirtualDesktop module to $moduleDirectory"
+    } catch {
+        Write-Warning "Could not install the VirtualDesktop module: $($_.Exception.Message)"
+        Write-Warning 'The tool will still move windows between monitors, but not between virtual desktops.'
+    }
+}
+
+if (-not $SkipVirtualDesktopModule) {
+    Ensure-VirtualDesktopModule
 }
 
 Write-Host ''
