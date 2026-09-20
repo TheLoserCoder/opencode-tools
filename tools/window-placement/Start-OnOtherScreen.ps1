@@ -102,6 +102,53 @@ function Resolve-TargetScreen {
     return $match[0]
 }
 
+function Get-AncestorProcessIds {
+    param(
+        [int] $ProcessId,
+        [int] $MaxDepth = 20
+    )
+
+    $processes = Get-CimInstance -ClassName Win32_Process -ErrorAction SilentlyContinue |
+        Select-Object ProcessId, ParentProcessId
+
+    $parentOf = @{}
+    foreach ($process in $processes) {
+        $parentOf[[int] $process.ProcessId] = [int] $process.ParentProcessId
+    }
+
+    $result = New-Object System.Collections.Generic.List[int]
+    $current = $ProcessId
+    $depth = 0
+    while ($parentOf.ContainsKey($current) -and $depth -lt $MaxDepth) {
+        $parent = $parentOf[$current]
+        if ($parent -le 0) {
+            break
+        }
+        $result.Add($parent)
+        $current = $parent
+        $depth++
+    }
+
+    return $result
+}
+
+function Get-DesktopIndexFromProcessWindows {
+    param([int] $ProcessId)
+
+    foreach ($handle in [OpenCodeTools.WindowInterop]::GetTopLevelWindows($ProcessId)) {
+        try {
+            $index = Get-DesktopIndex (Get-DesktopFromWindow -Hwnd $handle)
+            if ($index -ge 0) {
+                return $index
+            }
+        } catch {
+            # Window cannot be mapped to a desktop; try the next one.
+        }
+    }
+
+    return -1
+}
+
 function Import-VirtualDesktopModule {
     if (-not (Get-Module -ListAvailable -Name VirtualDesktop)) {
         return $false
@@ -127,6 +174,18 @@ function Resolve-DesktopTarget {
     }
 
     if ($Selector -ieq 'auto') {
+        # Prefer the desktop of the process that hosts OpenCode, found by walking the
+        # ancestor chain up to the process that owns a visible window. This does not
+        # depend on which window currently has focus, so it works when the user is
+        # looking at another application on another virtual desktop.
+        foreach ($ancestorId in (Get-AncestorProcessIds -ProcessId $PID)) {
+            $index = Get-DesktopIndexFromProcessWindows -ProcessId $ancestorId
+            if ($index -ge 0) {
+                return [string] $index
+            }
+        }
+
+        # Fall back to the focused window and the console window.
         $candidateHandles = @()
         foreach ($provider in @('Get-ActiveWindowHandle', 'Get-ConsoleHandle')) {
             try {

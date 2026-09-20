@@ -72,7 +72,7 @@ From the OpenCode TUI:
 | `-Command`           | required (positional)| Command to run, for example `pnpm dev`.                                     |
 | `-WorkingDirectory`  | current directory    | Directory to run the command in.                                            |
 | `-TargetScreen`      | `other`              | `other` = a monitor other than the active one; or a 1-based index; or a device name such as `\\.\DISPLAY2`. |
-| `-VirtualDesktop`    | `auto`               | `auto` = the virtual desktop where OpenCode is running (from the active window); `none` = do not move between desktops; or an explicit index or desktop name. |
+| `-VirtualDesktop`    | `auto`               | `auto` = the virtual desktop where OpenCode is running (detected from the launcher's process chain, independent of focus); `none` = do not move between desktops; or an explicit index or desktop name. |
 | `-TimeoutSeconds`    | `30`                 | How long the background watcher waits for windows to appear.                |
 
 ## How it works
@@ -81,8 +81,11 @@ From the OpenCode TUI:
    terminal running OpenCode.
 2. It picks the target monitor: the first non-primary monitor that is not the active
    one (or the monitor you requested explicitly).
-3. It reads the **virtual desktop of the OpenCode terminal** while that terminal is
-   still focused, so the target desktop is fixed at launch time. This matters because
+3. It finds the **virtual desktop where OpenCode is running** by walking its own
+   ancestor process chain up to the process that owns a visible window (for example
+   `OpenCode.exe` or the terminal emulator) and reading that window's desktop. This
+   does not depend on which window currently has focus, so it works even when you are
+   looking at another application on another virtual desktop. This matters because
    Windows creates new windows on the *currently active* virtual desktop, which may
    differ from OpenCode's desktop by the time the window appears.
 4. It starts a hidden background watcher for the process tree of the command.
@@ -104,10 +107,11 @@ the launcher warns and continues with the monitor move only.
   undocumented Windows interface whose identifiers change between Windows releases.
   It currently supports Windows 11 24H2; a future Windows update may require a module
   update.
-- **Detection from the active window.** `-VirtualDesktop auto` reads the desktop of
-  the focused window at launch. If a command is started while the OpenCode terminal is
-  not focused, the desktop cannot be detected and the virtual desktop move is skipped
-  (the monitor move still applies).
+- **Detection from the process chain.** `-VirtualDesktop auto` reads the desktop from
+  the window-owning ancestor process of the launcher. If that chain has no visible
+  window (for example a detached service), it falls back to the focused window and the
+  console window, and finally skips the virtual desktop move (the monitor move still
+  applies).
 - **Elevated windows.** Windows belonging to an elevated (administrator) process
   cannot be moved from a non-elevated script.
 - **Saved positions.** An application that persists and restores its own window
